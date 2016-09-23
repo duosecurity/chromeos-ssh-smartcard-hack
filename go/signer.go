@@ -2,9 +2,7 @@ package main
 
 import (
 	"crypto"
-	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/rsa"
 	"crypto/x509"
 	"errors"
 	"io"
@@ -14,20 +12,20 @@ import (
 
 var ErrUnsupportedHash = errors.New("unsupported hash")
 
-type PKSigner struct {
-	pk   *PlatformKeys
+type CPSigner struct {
+	cp *CertificateProvider
 	cert *x509.Certificate
 }
 
-func NewPKSigner(pk *PlatformKeys, cert *x509.Certificate) crypto.Signer {
-	return &PKSigner{
-		pk:   pk,
+func NewCPSigner(cp *CertificateProvider, cert *x509.Certificate) crypto.Signer {
+	return &CPSigner{
+		cp: cp,
 		cert: cert,
 	}
 }
 
-func (pks *PKSigner) Public() crypto.PublicKey {
-	return pks.cert.PublicKey
+func (cps *CPSigner) Public() crypto.PublicKey {
+	return cps.cert.PublicKey
 }
 
 // Limited to just the hashes supported by WebCrypto
@@ -40,10 +38,10 @@ var hashPrefixes = map[crypto.Hash][]byte{
 }
 
 var hashNames = map[crypto.Hash]string{
-	crypto.SHA1:    "SHA-1",
-	crypto.SHA256:  "SHA-256",
-	crypto.SHA384:  "SHA-384",
-	crypto.SHA512:  "SHA-512",
+	crypto.SHA1:    "SHA1",
+	crypto.SHA256:  "SHA256",
+	crypto.SHA384:  "SHA384",
+	crypto.SHA512:  "SHA512",
 	crypto.Hash(0): "none",
 }
 
@@ -53,65 +51,13 @@ var curveNames = map[elliptic.Curve]string{
 	elliptic.P521(): "P-521",
 }
 
-func (pks *PKSigner) Sign(rand io.Reader, msg []byte, opts crypto.SignerOpts) (signature []byte, err error) {
-	// RSA is kind of a small disaster because of the way that the
-	// crypto.Signer interface is laid out.
-	//
-	// For PKCS1v1.5 RSA signatures, the input to the actual
-	// signature function is an ASN.1 DER-encoded
-	// structure. WebCrypto has hash-specific mechanisms which
-	// know how to generate that structure, but they all assume
-	// the data is un-hashed, which is not the case with the
-	// crypto.Signer interface, so we have to ues {hash: {name:
-	// 'none'}}, which just performs the raw signature operation.
-	//
-	// This means we have to generate the ASN.1 structure
-	// ourselves, which we can do by just having the correct
-	// prefixes for all the hashes we might want to use. Prefixes
-	// are taken from src/crypto/rsa/pkcs1v15.go. No other
-	// signatures require this song and dance
-
+func (cps *CPSigner) Sign(rand io.Reader, msg []byte, opts crypto.SignerOpts) (signature []byte, err error) {
 	hash := hashNames[opts.HashFunc()]
 
-	var algorithm js.M
-	switch k := pks.Public().(type) {
-	case *rsa.PublicKey:
-		if pssOpts, ok := opts.(*rsa.PSSOptions); ok {
-			algorithm = js.M{
-				"name":       "RSA-PSS",
-				"saltLength": pssOpts.SaltLength,
-				"hash":       js.M{"name": hash},
-			}
-		} else {
-			algorithm = js.M{
-				"name": "RSASSA-PKCS1-v1_5",
-				"hash": js.M{"name": "none"},
-			}
-
-			prefix, ok := hashPrefixes[opts.HashFunc()]
-			if !ok {
-				return nil, ErrUnsupportedHash
-			}
-
-			msg = append(prefix, msg...)
-		}
-	case *ecdsa.PublicKey:
-		curveName, ok := curveNames[k.Curve]
-		if !ok {
-			return nil, ErrUnsupported
-		}
-
-		algorithm = js.M{
-			"name":       "ECDSA",
-			"hash":       js.M{"name": hash},
-			"namedCurve": curveName,
-		}
+	signRequest := js.M{
+		"digest": js.NewArrayBuffer(msg),
+		"hash": hash,
+		"certificate": js.NewArrayBuffer(cps.cert.Raw),
 	}
-
-	_, privkey, err := pks.pk.GetKeyPair(pks.cert.Raw, algorithm)
-	if err != nil {
-		return nil, err
-	}
-
-	return pks.pk.Sign(algorithm, privkey, msg)
+	return cps.cp.Sign(signRequest)
 }

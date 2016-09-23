@@ -1,40 +1,43 @@
-# MacGyver
+# ChromeOS SSH SmartCard Hack
 
-![Agent MacGyver](http://i.imgur.com/iwNSsNR.png ""If I had some duct tape, I could fix that"")
+This repository contains some code to duct-tape an SSH agent to a
+Chrome extension that implements the [chrome.certificateProvider][]
+API. This can make it possible to use Smart Cards with the [Secure Shell][]
+app!
 
-MacGyver is a Chrome extension for enterprise-managed Chromebooks. It
-duct tapes an SSH agent to the new [chrome.platformKeys][] API
-(which provides access to X.509 certificates stored in a Chromebook's
-TPM), exposing it to the Chrome [Secure Shell][] extension.
+This is forked from, and heavily based on, the [MacGyver][] extension
+developed by the good folks at Stripe.
 
 ## Background
 
-For some time, Chrome OS has included the ability to store X.509
-certificates in its [TPM][]. This allows certificates to be stored in
-such a way that the private keys can not be extracted. Chrome 45 added
-the new [chrome.platformKeys][] extension API, which allows extensions
-to use those certificates (subject to some permissions constraints)
-for signing data.
+Recently, Chrome OS introduced full [Smart Card support][], along with
+the [chrome.certificateProvider][] API that allows Smart Card
+middleware extensions to provide certificates (and the ability to sign
+data) to ChromeOS for TLS client authentication.
 
 Separately, the [Secure Shell][] extension for Chrome (which is an
 OpenSSH compiled for [NaCl][]) [supports][chromium-hterm ssh-agent]
 using an external extension as a stand-in for an SSH agent.
 
-MacGyver duct tapes these two developments together, allowing the
-[Secure Shell][] extension to utilize TPM-stored certificates (or,
-really, the public key in the certificates) and private keys via the
-SSH agent protocol and the [chrome.platformKeys][] API.
+The interface offered by [chrome.certificateProvider][] extensions
+provides all the necessary cryptographic capabilities to implement a
+full-fledged SSH Agent extension that uses keypairs stored on smart
+cards. However, at this time, there is no clean way for another
+extension to access this functionality. Our solution is, instead, to
+inject a modified version of the [MacGyver][] code into a
+[chrome.certificateProvider][] extension. It turns out this is
+surprisingly straightforward!
 
 ## Usage
 
-After installing, you can pass `--ssh-agent=extensionid` in the "relay
-options" field (not the "SSH Arguments"!) of the Secure Shell
-extension.
+After installing a properly-hacked extension, you can pass
+`--ssh-agent=extensionid` in the "relay options" field (not the "SSH
+Arguments"!) of the Secure Shell app.
 
-## Building
+## Performing the Hack
 
-The extension is written in [Go][], and compiled to JavaScript using
-[GopherJS][]. Using Go lets us take advantage of packages like
+The SSH Agent code is written in [Go][], and compiled to JavaScript
+using [GopherJS][]. Using Go lets us take advantage of packages like
 [x/crypto][], which already has an SSH agent implementation.
 
 You can compile the extension by running the following:
@@ -42,47 +45,82 @@ You can compile the extension by running the following:
  * `go get -u github.com/gopherjs/gopherjs`
  * `cd go && gopherjs build`
 
+Then, take an existing [chrome.certificateProvider][] extension,
+unpack it if necessary, and do the following:
+
+ * Copy the 'go' directory and all its contents into the unpacked
+   extension directory
+ * Edit manifest.json
+    * Add `"go/go.js"` as a background script.
+
+      That is, if manifest.json initially contains:
+
+      ```
+      "app": {
+          "background": {
+             "persistent": false,
+             "scripts": [ "background.js" ]
+          }
+      },
+      ```
+
+      Then modify it to contain:
+
+      ```
+      "app": {
+          "background": {
+             "persistent": false,
+             "scripts": [ "background.js", "go/go.js" ]
+          }
+      },
+      ```
+
+    * Allow messaging from the [Secure Shell][] app.
+
+      That is, add:
+
+      ```
+      "externally_connectable": {
+          "ids": [
+              "pnhechapfaindjhompbnflcldabbghjo",
+              "okddffdblfhhnmhodogpojmfkjmhinfp"
+              ]
+      },
+      ```
+
+      as a top-level key. (You may want to use the original
+      manifest.json from [MacGyver][] as a reference.)
+
+
 ## Permissions
 
-Unfortunately, the new [chrome.platformKeys][] API doesn't make it
-very easy to get at certificates.
+In order to communicate with smart card hardware, middleware
+extensions (typically, those that implement the
+[chrome.certificateProvider][] interface) must use Google's [Smart
+Card Connector][] app. Unfortunately, this app has a highly
+restrictive model for [API permissions][Smart Card Connector API
+Permissions], in that it only accepts communications from whitelisted
+extensions. When you modify an extension as described above, you will
+typically end up with a new extension ID that is not on this
+whitelist.
 
-It's only possible to access certificates that were generated using
-the [chrome.enterprise.platformKeys][] API. In order to use MacGyver,
-this means that you must have an enterprise-enrolled Chromebook that
-uses an administrator-provisioned extension to generate and load
-certificates. This also means that MacGyver will never see
-certificates that are (e.g.) imported using the Certificate manager or
-generated via &lt;keygen&gt; tags.
+If you are deploying this extension onto enterprise-managed
+chromebooks, you can attach policy to the Smart Card Connector app to
+override this whitelist, as Google documents in their discussion of
+[API permissions][Smart Card Connector API Permissions].
 
-Additionally, even if an extension has the `platformKeys` permission,
-it can only access certificates created by
-[chrome.enterprise.platformKeys][] if it's been explicitly whitelisted
-for that access. That whitelisting happens via the `KeyPermissions`
-policy, which must be set to `{"extensionid":
-{"allowCorporateKeyUsage": true}}`.
+Otherwise, with some JS hackery, it's possible to force-whitelist a
+Chrome extension. To do this:
 
-Unfortunately, this is tricky, since the [KeyPermissions][] policy is
-not yet exposed from the Google Apps control panel. As of this
-writing, the only way to set `KeyPermissions` is to enter developer
-mode (the process [differs by model][Chromebook developer mode]),
-[disabling rootfs verification][Chromebook rootfs], and manually
-creating a [Linux policy file][] in (for example)
-`/etc/opt/chrome/policies/managed/macgyver.json`. The contents of the
-file should look something like this:
+ 1. Navigate to chrome://extensions/
+ 2. Ensure "Developer Mode" is checked
+ 3. Beneath the "Smart Card Connector" app, click the link to inspect
+    the 'background page'
+ 4. In the JS console, type:
+    `$jscomp.scope.permissionsChecker.userPromptingChecker_.storeUserSelection_('YOUR_EXTENSION_ID', true)`
 
-```json
-{
-  "KeyPermissions": {
-    "monnheglpedplnifignjahmadpadlmgj": "allowCorporateKeyUsage"
-  }
-}
-```
-
-Once the file is in place, the system policies can be reloaded by
-going to chrome://policy and clicking "Reload policies". If the
-configuration worked, the `KeyPermissions` policy should immediately
-show up in the list of active policies.
+(Obviously, there's a risk this technique might break with a future
+update to the Smart Card Connector app!)
 
 ## Chrome SSH Agent Protocol
 
@@ -124,31 +162,27 @@ that between [Secure Shell][]'s protocol and the native protocol
 (stripping or adding the length prefix and JSON object wrapper as
 necessary).
 
-## Hacking
-
-If you want to hack on this not on a Chromebook, there's a rough localStorage
-backend for keys that you can use instead of Chrome PlatformKeys.
-
- * Create a localStorage item for the extension with key `privateKey`. An easy way to do this is to open the console and run `localStorage.privateKey = "-----BEGIN RSA PRIVATE KEY-----\nkey\nwith\nliteral\nnewlines\n-----END RSA PRIVATE KEY-----"`
- * Edit main.go and change the branch to false.
-
 ## Contributors
+
+MacGyver extension:
 
 * Evan Broder
 * Dan Benamy
 
-[Chromebook developer mode]: https://www.chromium.org/chromium-os/developer-information-for-chrome-os-devices
-[Chromebook rootfs]: https://www.chromium.org/chromium-os/poking-around-your-chrome-os-device#TOC-Making-changes-to-the-filesystem
+CertificateProvider modifications:
+
+* Adam Goodman
+
 [Cross-extension messaging]: https://developer.chrome.com/extensions/messaging#external
 [Go]: http://golang.org/
 [Gopherjs]: http://www.gopherjs.org/
-[KeyPermissions]: https://www.chromium.org/administrators/policy-list-3#KeyPermissions
-[Linux policy file]: https://www.chromium.org/administrators/linux-quick-start
+[MacGyver]: https://github.com/stripe/macgyver
 [NaCl]: https://en.wikipedia.org/wiki/Google_Native_Client
 [Secure Shell]: https://chrome.google.com/webstore/detail/secure-shell/pnhechapfaindjhompbnflcldabbghjo?hl=en
-[TPM]: https://en.wikipedia.org/wiki/Trusted_Platform_Module
-[chrome.enterprise.platformKeys]: https://developer.chrome.com/extensions/enterprise_platformKeys
-[chrome.platformKeys]: https://developer.chrome.com/extensions/platformKeys
+[Smart Card support]: https://support.google.com/chrome/a/answer/7014689?hl=en
+[Smart Card Connector]: https://chrome.google.com/webstore/detail/smart-card-connector/khpfeaanjngmcnplbdlpegiifgpfgdco
+[Smart Card Connector API Permissions]: https://github.com/GoogleChrome/chromeos_smart_card_connector#smart-card-connector-app-api-permissions
+[chrome.certificateProvider]: https://developer.chrome.com/extensions/certificateProvider
 [chrome.runtime.connect]: https://developer.chrome.com/extensions/runtime#method-connect
 [chromium-hterm ssh-agent]: https://groups.google.com/a/chromium.org/d/msg/chromium-hterm/iq-AuvRJsYw/QVJdCw2wSM0J
 [io.ReadWriter]: https://godoc.org/io#ReadWriter

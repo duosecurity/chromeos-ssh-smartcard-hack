@@ -4,23 +4,21 @@ import (
 	"crypto/x509"
 	"log"
 
-	"github.com/gopherjs/gopherjs/js"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
 
-type PlatformKeysBackend struct {
-	pk *PlatformKeys
+type CertificateProviderBackend struct {
+	cp *CertificateProvider
 }
 
-func NewPlatformKeysBackend() *PlatformKeysBackend {
-	pk := js.Global.Get("chrome").Get("platformKeys")
-	return &PlatformKeysBackend{
-		pk: &PlatformKeys{pk},
+func NewCertificateProviderBackend() *CertificateProviderBackend {
+	return &CertificateProviderBackend{
+		cp: &CertificateProvider{},
 	}
 }
 
-func (a *PlatformKeysBackend) List() ([]*agent.Key, error) {
+func (a *CertificateProviderBackend) List() ([]*agent.Key, error) {
 	certs, err := a.listCertificates()
 	if err != nil {
 		return nil, err
@@ -44,14 +42,14 @@ func (a *PlatformKeysBackend) List() ([]*agent.Key, error) {
 	return keys, nil
 }
 
-func (a *PlatformKeysBackend) Signers() (signers []ssh.Signer, err error) {
+func (a *CertificateProviderBackend) Signers() (signers []ssh.Signer, err error) {
 	certs, err := a.listCertificates()
 	if err != nil {
 		return nil, err
 	}
 
 	for _, cert := range certs {
-		signer, err := ssh.NewSignerFromSigner(NewPKSigner(a.pk, cert))
+		signer, err := ssh.NewSignerFromSigner(NewCPSigner(a.cp, cert))
 		if err != nil {
 			return nil, err
 		}
@@ -61,16 +59,8 @@ func (a *PlatformKeysBackend) Signers() (signers []ssh.Signer, err error) {
 	return
 }
 
-func (a *PlatformKeysBackend) listCertificates() ([]*x509.Certificate, error) {
-	req := js.M{
-		"request": js.M{
-			"certificateTypes":       []string{},
-			"certificateAuthorities": js.S{},
-		},
-		"interactive": false,
-	}
-
-	matches, err := a.pk.SelectClientCertificates(req)
+func (a *CertificateProviderBackend) listCertificates() ([]*x509.Certificate, error) {
+	matches, err := a.cp.ListClientCertificates()
 	if err != nil {
 		return nil, err
 	}
